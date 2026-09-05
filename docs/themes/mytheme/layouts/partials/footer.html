@@ -1,0 +1,66 @@
+<footer class="footer py-4 py-md-5 px-4 px-md-3 mt-3">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-3 mb-3">
+        <p class="fs-5">{{ .Site.Title }}</p>
+        <ul class="list-unstyled small text-muted">
+          {{ if (isset .Site.Params "copyright") }}
+          <li class="mb-2">{{ .Site.Params.copyright }}</li>
+          {{ end }}
+          {{ if (isset .Site.Params "license") }}
+          <li class="mb-2"><a href="{{ .Site.Params.license.url }}">{{ .Site.Params.license.name }} licensed</a></li>
+          {{ end }}
+        </ul>
+      </div>
+      <div class="col-6 col-lg-2 offset-lg-1 mb-3">
+        <h5>Links</h5>
+        <ul class="list-unstyled">
+          <li class="mb-2"><a href="{{ .Site.Home.RelPermalink }}">Home</a></li>
+          {{- range .Site.Menus.main.ByWeight -}}
+            {{- if not .HasChildren }}
+          <li class="mb-2"><a href="{{ relURL .URL }}">{{ .Title }}</a></li>
+            {{- end }}
+          {{- end }}
+        </ul>
+      </div>
+      <div class="col-6 col-lg-2 mb-2">
+        <h5>Guides</h5>
+        <ul class="list-unstyled">
+          {{- range .Site.Menus.guides.ByWeight -}}
+          <li class="mb-2"><a href="{{ relURL .URL }}">{{ .Title }}</a></li>
+          {{- end }}
+        </ul>
+      </div>
+      {{ if (isset .Site.Params "github") }}
+        {{ $projectURL := print "https://github.com/" .Site.Params.github.user "/" .Site.Params.github.project }}
+      <div class="col-6 col-lg-2 mb-2">
+        <h5>Community</h5>
+        <ul class="list-unstyled">
+          <li class="mb-2">
+            <a href="{{ $projectURL }}">
+              Github
+            </a>
+          </li>
+          {{ if (isset .Site.Params "community") }}
+          <li class="mb-2">
+            <a href="{{ .Site.Params.community.url }}">
+              {{ .Site.Params.community.title }}
+            </a>
+          </li>
+          {{ end }}
+        </ul>
+      </div>
+      {{ end }}
+    </div>
+  </div>
+</footer>
+
+<!-- JavaScript and dependencies -->
+{{- $bundle := slice
+    (resources.Get "js/doc-version-select.js")
+    (resources.Get "js/linkable-headline-area.js")
+    (resources.Get "js/doc-search.js") |
+    resources.Concat "js/main.js" |
+    js.Build (dict "minify" true) -}}
+<script src="{{ $bundle.RelPermalink }}" defer></script>
+

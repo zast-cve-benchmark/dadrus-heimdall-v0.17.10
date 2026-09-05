@@ -1,0 +1,15 @@
+ignore:
+- "**/*generated.go"
+- "**/mock_*.go"
+- "**/mocks/**"
+- "**/*_test.go"
+- "**/testsupport/**"
+- "**/zz_generated.*"
+coverage:
+  status:
+    # we've found this not to be useful
+    patch: off
+    project:
+      default:
+        # allow test coverage to drop by 1%, assume that it's typically due to CI problems
+        threshold: 1

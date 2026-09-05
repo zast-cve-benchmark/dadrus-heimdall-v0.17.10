@@ -1,0 +1,55 @@
+log:
+  level: debug
+
+tracing:
+  enabled: false
+
+metrics:
+  enabled: false
+
+serve:
+  trusted_proxies:
+    - 0.0.0.0/0
+
+mechanisms:
+  authenticators:
+  - id: deny_all
+    type: unauthorized
+  - id: anon
+    type: anonymous
+  - id: jwt_auth
+    type: jwt
+    config:
+      jwks_endpoint: http://idp:8080/.well-known/jwks
+      assertions:
+        issuers:
+        - demo_issuer
+  authorizers:
+  - id: opa
+    type: remote
+    config:
+      endpoint: http://opa:8181/v1/data/{{ .Values.policy }}
+      payload: "{}"
+      expressions:
+      - expression: |
+          Payload.result == true
+  finalizers:
+  - id: create_jwt
+    type: jwt
+    config:
+      signer:
+        key_store:
+          path: /etc/heimdall/keys/signer.pem
+  - id: noop
+    type: noop
+
+default_rule:
+  execute:
+  - authenticator: deny_all
+  - finalizer: create_jwt
+
+providers:
+  file_system:
+    src: /etc/heimdall/rules.yaml
+    watch: true
+

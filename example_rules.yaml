@@ -1,0 +1,44 @@
+version: "1alpha4"
+name: test-rule-set
+rules:
+- id: rule:foo
+  match:
+    routes:
+      - path: /foo/:bar/**
+        path_params:
+          - name: bar
+            type: glob
+            value: "*baz"
+    methods:
+      - GET
+      - POST
+    hosts:
+      - type: exact
+        value: foo.bar
+    scheme: http
+  forward_to:
+    host: bar.foo
+  execute:
+    - authenticator: unauthorized_authenticator
+    - authenticator: jwt_authenticator
+      config:
+        assertions:
+          allowed_algorithms:
+            - RS256
+          issuers:
+            - http://127.0.0.1:4444/
+          scopes:
+            - profile
+    - authenticator: hydra_authenticator
+    - contextualizer: subscription_contextualizer
+    - authorizer: allow_all_authorizer
+    - finalizer: jwt
+      config:
+        claims: |
+          {"foo": "bar"}
+    - finalizer: bla
+      config:
+        headers:
+          foo-bar: bla
+    - finalizer: blabla
+# no on_error (reuses default)

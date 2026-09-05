@@ -1,0 +1,403 @@
+// Copyright 2022 Dimitrij Drus <dadrus@gmx.de>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package authenticators
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/dadrus/heimdall/internal/app"
+	"github.com/dadrus/heimdall/internal/cache"
+	"github.com/dadrus/heimdall/internal/heimdall"
+	"github.com/dadrus/heimdall/internal/rules/endpoint"
+	"github.com/dadrus/heimdall/internal/rules/mechanisms/authenticators/extractors"
+	"github.com/dadrus/heimdall/internal/rules/mechanisms/subject"
+	"github.com/dadrus/heimdall/internal/rules/mechanisms/template"
+	"github.com/dadrus/heimdall/internal/x"
+	"github.com/dadrus/heimdall/internal/x/errorchain"
+	"github.com/dadrus/heimdall/internal/x/stringx"
+)
+
+// by intention. Used only during application bootstrap
+//
+//nolint:gochecknoinits
+func init() {
+	registerTypeFactory(
+		func(app app.Context, name string, typ string, conf map[string]any) (bool, Authenticator, error) {
+			if typ != AuthenticatorGeneric {
+				return false, nil, nil
+			}
+
+			auth, err := newGenericAuthenticator(app, name, conf)
+
+			return true, auth, err
+		})
+}
+
+type genericAuthenticator struct {
+	name                string
+	id                  string
+	app                 app.Context
+	e                   endpoint.Endpoint
+	ads                 extractors.AuthDataExtractStrategy
+	payload             template.Template
+	fwdHeaders          []string
+	fwdCookies          []string
+	sf                  SubjectFactory
+	ttl                 time.Duration
+	sessionLifespanConf *SessionLifespanConfig
+}
+
+func newGenericAuthenticator(app app.Context, name string, rawConfig map[string]any) (*genericAuthenticator, error) {
+	logger := app.Logger()
+	logger.Info().
+		Str("_type", AuthenticatorGeneric).
+		Str("_name", name).
+		Msg("Creating authenticator")
+
+	type Config struct {
+		Endpoint              endpoint.Endpoint                   `mapstructure:"identity_info_endpoint"     validate:"required"` //nolint:lll
+		SubjectInfo           SubjectInfo                         `mapstructure:"subject"                    validate:"required"` //nolint:lll
+		AuthDataSource        extractors.CompositeExtractStrategy `mapstructure:"authentication_data_source" validate:"required"` //nolint:lll
+		ForwardHeaders        []string                            `mapstructure:"forward_headers"`
+		ForwardCookies        []string                            `mapstructure:"forward_cookies"`
+		Payload               template.Template                   `mapstructure:"payload"`
+		SessionLifespanConfig *SessionLifespanConfig              `mapstructure:"session_lifespan"`
+		CacheTTL              *time.Duration                      `mapstructure:"cache_ttl"`
+		AllowFallbackOnError  bool                                `mapstructure:"allow_fallback_on_error"`
+	}
+
+	var conf Config
+	if err := decodeConfig(app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for generic authenticator '%s'", name).CausedBy(err)
+	}
+
+	if conf.AllowFallbackOnError {
+		logger.Warn().
+			Str("_type", AuthenticatorGeneric).
+			Str("_name", name).
+			Msg("Usage of allow_fallback_on_error on authenticator is deprecated and has no effect")
+	}
+
+	if strings.HasPrefix(conf.Endpoint.URL, "http://") {
+		logger.Warn().
+			Str("_type", AuthenticatorGeneric).
+			Str("_name", name).
+			Msg("No TLS configured for the endpoint used in authenticator")
+	}
+
+	return &genericAuthenticator{
+		name:       name,
+		id:         name,
+		app:        app,
+		e:          conf.Endpoint,
+		ads:        conf.AuthDataSource,
+		payload:    conf.Payload,
+		fwdHeaders: conf.ForwardHeaders,
+		fwdCookies: conf.ForwardCookies,
+		sf:         &conf.SubjectInfo,
+		ttl: x.IfThenElseExec(conf.CacheTTL != nil,
+			func() time.Duration { return *conf.CacheTTL },
+			func() time.Duration { return 0 }),
+		sessionLifespanConf: conf.SessionLifespanConfig,
+	}, nil
+}
+
+func (a *genericAuthenticator) Execute(ctx heimdall.RequestContext) (*subject.Subject, error) {
+	logger := zerolog.Ctx(ctx.Context())
+	logger.Debug().
+		Str("_type", AuthenticatorGeneric).
+		Str("_name", a.name).
+		Str("_id", a.id).
+		Msg("Executing authenticator")
+
+	authData, err := a.ads.GetAuthData(ctx)
+	if err != nil {
+		return nil, errorchain.
+			NewWithMessage(heimdall.ErrAuthentication, "failed to get authentication data from request").
+			WithErrorContext(a).
+			CausedBy(err)
+	}
+
+	payload, err := a.getSubjectInformation(ctx, authData)
+	if err != nil {
+		return nil, err
+	}
+
+	sub, err := a.sf.CreateSubject(payload)
+	if err != nil {
+		return nil, errorchain.
+			NewWithMessage(heimdall.ErrInternal, "failed to extract subject information from response").
+			WithErrorContext(a).
+			CausedBy(err)
+	}
+
+	return sub, nil
+}
+
+func (a *genericAuthenticator) WithConfig(stepID string, rawConfig map[string]any) (Authenticator, error) {
+	// this authenticator allows ttl to be redefined on the rule level
+	if len(stepID) == 0 && len(rawConfig) == 0 {
+		return a, nil
+	}
+
+	if len(rawConfig) == 0 {
+		auth := *a
+		auth.id = stepID
+
+		return &auth, nil
+	}
+
+	type Config struct {
+		CacheTTL             *time.Duration `mapstructure:"cache_ttl"`
+		AllowFallbackOnError *bool          `mapstructure:"allow_fallback_on_error"`
+	}
+
+	var conf Config
+	if err := decodeConfig(a.app, rawConfig, &conf); err != nil {
+		return nil, errorchain.NewWithMessagef(heimdall.ErrConfiguration,
+			"failed decoding config for generic authenticator '%s'", a.name).CausedBy(err)
+	}
+
+	if conf.AllowFallbackOnError != nil {
+		logger := a.app.Logger()
+		logger.Warn().
+			Str("_type", AuthenticatorGeneric).
+			Str("_name", a.name).
+			Msg("Usage of allow_fallback_on_error on authenticator is deprecated and has no effect")
+	}
+
+	return &genericAuthenticator{
+		name:       a.name,
+		id:         x.IfThenElse(len(stepID) == 0, a.id, stepID),
+		app:        a.app,
+		e:          a.e,
+		sf:         a.sf,
+		ads:        a.ads,
+		payload:    a.payload,
+		fwdHeaders: a.fwdHeaders,
+		fwdCookies: a.fwdCookies,
+		ttl: x.IfThenElseExec(conf.CacheTTL != nil,
+			func() time.Duration { return *conf.CacheTTL },
+			func() time.Duration { return a.ttl }),
+		sessionLifespanConf: a.sessionLifespanConf,
+	}, nil
+}
+
+func (a *genericAuthenticator) Name() string { return a.name }
+
+func (a *genericAuthenticator) ID() string { return a.id }
+
+func (a *genericAuthenticator) IsInsecure() bool { return false }
+
+func (a *genericAuthenticator) getSubjectInformation(ctx heimdall.RequestContext, authData string) ([]byte, error) {
+	logger := zerolog.Ctx(ctx.Context())
+	cch := cache.Ctx(ctx.Context())
+
+	var (
+		cacheKey string
+		session  *SessionLifespan
+	)
+
+	if a.ttl > 0 {
+		cacheKey = a.calculateCacheKey(authData)
+		if entry, err := cch.Get(ctx.Context(), cacheKey); err == nil {
+			logger.Debug().Msg("Reusing subject information from cache")
+
+			return entry, nil
+		}
+	}
+
+	payload, err := a.fetchSubjectInformation(ctx, authData)
+	if err != nil {
+		return nil, err
+	}
+
+	if a.sessionLifespanConf != nil {
+		session, err = a.sessionLifespanConf.CreateSessionLifespan(payload)
+		if err != nil {
+			return nil, errorchain.New(heimdall.ErrInternal).WithErrorContext(a).CausedBy(err)
+		}
+
+		if session != nil {
+			if err = session.Assert(); err != nil {
+				return nil, errorchain.New(heimdall.ErrAuthentication).WithErrorContext(a).CausedBy(err)
+			}
+		}
+	}
+
+	if cacheTTL := a.getCacheTTL(session); cacheTTL > 0 {
+		if err = cch.Set(ctx.Context(), cacheKey, payload, cacheTTL); err != nil {
+			logger.Warn().Err(err).Msg("Failed to cache subject information")
+		}
+	}
+
+	return payload, nil
+}
+
+func (a *genericAuthenticator) fetchSubjectInformation(ctx heimdall.RequestContext, authData string) ([]byte, error) {
+	req, err := a.createRequest(ctx, authData)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.e.CreateClient(req.URL.Hostname()).Do(req)
+	if err != nil {
+		var clientErr *url.Error
+		if errors.As(err, &clientErr) && clientErr.Timeout() {
+			return nil, errorchain.
+				NewWithMessage(heimdall.ErrCommunicationTimeout,
+					"request to the endpoint to get information about the user timed out").
+				WithErrorContext(a).
+				CausedBy(err)
+		}
+
+		return nil, errorchain.
+			NewWithMessage(heimdall.ErrCommunication,
+				"request to the endpoint to get information about the user failed").
+			WithErrorContext(a).
+			CausedBy(err)
+	}
+
+	defer resp.Body.Close()
+
+	return a.readResponse(resp)
+}
+
+func (a *genericAuthenticator) createRequest(ctx heimdall.RequestContext, authData string) (*http.Request, error) {
+	logger := zerolog.Ctx(ctx.Context())
+
+	var body io.Reader
+
+	templateData := map[string]any{
+		"AuthenticationData": authData,
+	}
+
+	if a.payload != nil {
+		value, err := a.payload.Render(templateData)
+		if err != nil {
+			return nil, errorchain.NewWithMessage(heimdall.ErrInternal,
+				"failed to render payload for the authenticator endpoint").
+				WithErrorContext(a).CausedBy(err)
+		}
+
+		body = strings.NewReader(value)
+	}
+
+	req, err := a.e.CreateRequest(ctx.Context(), body,
+		endpoint.RenderFunc(func(value string) (string, error) {
+			tpl, err := template.New(value)
+			if err != nil {
+				return "", errorchain.NewWithMessage(heimdall.ErrInternal, "failed to create template").
+					WithErrorContext(a).
+					CausedBy(err)
+			}
+
+			return tpl.Render(templateData)
+		}))
+	if err != nil {
+		return nil, errorchain.
+			NewWithMessage(heimdall.ErrInternal, "failed creating request").
+			WithErrorContext(a).
+			CausedBy(err)
+	}
+
+	for _, headerName := range a.fwdHeaders {
+		headerValue := ctx.Request().Header(headerName)
+		if len(headerValue) == 0 {
+			logger.Warn().
+				Str("_header", headerName).
+				Msg("Header not present in the request but configured to be forwarded")
+		} else {
+			req.Header.Add(headerName, headerValue)
+		}
+	}
+
+	for _, cookieName := range a.fwdCookies {
+		cookieValue := ctx.Request().Cookie(cookieName)
+		if len(cookieValue) == 0 {
+			logger.Warn().
+				Str("_cookie", cookieName).
+				Msg("Cookie not present in the request but configured to be forwarded")
+		} else {
+			req.AddCookie(&http.Cookie{Name: cookieName, Value: cookieValue})
+		}
+	}
+
+	return req, nil
+}
+
+func (a *genericAuthenticator) readResponse(resp *http.Response) ([]byte, error) {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, errorchain.NewWithMessage(heimdall.ErrAuthentication,
+			"received authentication data rejected").WithErrorContext(a)
+	case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
+		return nil, errorchain.NewWithMessagef(heimdall.ErrCommunication,
+			"unexpected response code: %v", resp.StatusCode).WithErrorContext(a)
+	}
+
+	rawData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errorchain.NewWithMessage(heimdall.ErrInternal, "failed to read response").
+			WithErrorContext(a).
+			CausedBy(err)
+	}
+
+	return rawData, nil
+}
+
+func (a *genericAuthenticator) getCacheTTL(sessionLifespan *SessionLifespan) time.Duration {
+	// timeLeeway defines the default time deviation to ensure the session is still valid
+	// when used from cache
+	const timeLeeway = 10
+
+	if a.ttl <= 0 {
+		return 0
+	}
+
+	// we cache using the settings in the configured ttl.
+	// It is however ensured, that this ttl does not exceed the ttl of the session itself
+	// (if this information is available)
+	if sessionLifespan != nil && !sessionLifespan.exp.Equal(time.Time{}) {
+		expiresIn := sessionLifespan.exp.Unix() - time.Now().Unix() - timeLeeway
+		expirationTTL := x.IfThenElse(expiresIn > 0, time.Duration(expiresIn)*time.Second, 0)
+
+		return min(a.ttl, expirationTTL)
+	}
+
+	return a.ttl
+}
+
+func (a *genericAuthenticator) calculateCacheKey(reference string) string {
+	digest := sha256.New()
+	digest.Write(a.e.Hash())
+	digest.Write(stringx.ToBytes(reference))
+
+	var result [sha256.Size]byte
+
+	return hex.EncodeToString(digest.Sum(result[:0]))
+}

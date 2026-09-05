@@ -1,0 +1,10 @@
+{{- define "main" -}}
+<div class="container-xxl d-xxl-flex">
+  <main class="pt-2 flex-xxl-grow-0">
+    <div>
+      <redoc spec-url="{{ .Params.spec | relURL }}"></redoc>
+    </div>
+  </main>
+</div>
+<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"> </script>
+{{ end }}

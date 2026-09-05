@@ -1,0 +1,159 @@
+// Copyright 2023 Dimitrij Drus <dadrus@gmx.de>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package otelmetrics
+
+import (
+	"net/http"
+	"strings"
+	"sync"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
+	"go.opentelemetry.io/otel/semconv/v1.38.0/httpconv"
+
+	"github.com/dadrus/heimdall/internal/x/httpx"
+)
+
+const (
+	instrumentationName = "github.com/dadrus/heimdall/internal/handler/middleware/http/otelmetrics"
+)
+
+func New(opts ...Option) func(http.Handler) http.Handler {
+	conf := newConfig(opts...)
+
+	meter := conf.provider.Meter(instrumentationName)
+
+	activeRequests, err := httpconv.NewServerActiveRequests(meter)
+	if err != nil {
+		panic(err)
+	}
+
+	pool := sync.Pool{
+		New: func() any {
+			// actually, we add len(conf.attributes) + 5 (serverRequestMetrics & and conf.subsystem),
+			// but, since, we retrieve further attributes from the labeler, added by other OTEL components,
+			// we need to allocate more space. The additional 15 is a conservative value to avoid reallocations
+			attrs := make([]attribute.KeyValue, 0, len(conf.attributes)+20)
+
+			return &attrs
+		},
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			if !conf.shouldProcess(req) {
+				next.ServeHTTP(rw, req)
+
+				return
+			}
+
+			labeler, _ := otelhttp.LabelerFromContext(req.Context())
+			if conf.subsystem.Valid() {
+				labeler.Add(conf.subsystem)
+			}
+
+			pkv := pool.Get().(*[]attribute.KeyValue) //nolint: forcetypeassert
+			attrs := *pkv
+
+			defer func() {
+				*pkv = attrs[:0]
+
+				pool.Put(pkv)
+			}()
+
+			attrs = addRequestMetrics(attrs, conf.server, req)
+			attrs = append(labeler.Get(), attrs...)
+			attrs = append(attrs, conf.attributes...)
+
+			opt := metric.WithAttributeSet(attribute.NewSet(attrs...))
+
+			activeRequests.Inst().Add(req.Context(), 1, opt)
+			defer activeRequests.Inst().Add(req.Context(), -1, opt)
+
+			next.ServeHTTP(rw, req)
+		})
+	}
+}
+
+func addRequestMetrics(attrs []attribute.KeyValue, server string, req *http.Request) []attribute.KeyValue {
+	var (
+		host string
+		port int
+	)
+
+	if server == "" {
+		host, port = httpx.HostPort(req.Host)
+	} else {
+		// Prioritize the primary server name.
+		host, port = httpx.HostPort(server)
+		if port < 0 {
+			_, port = httpx.HostPort(req.Host)
+		}
+	}
+
+	hostPort := requiredHTTPPort(req.TLS != nil, port)
+
+	attrs = append(attrs, methodMetric(req.Method))
+	attrs = append(attrs, semconv.ServerAddress(host))
+
+	if req.TLS != nil {
+		attrs = append(attrs, semconv.URLScheme("https"))
+	} else {
+		attrs = append(attrs, semconv.URLScheme("http"))
+	}
+
+	if hostPort > 0 {
+		attrs = append(attrs, semconv.ServerPort(hostPort))
+	}
+
+	return attrs
+}
+
+func methodMetric(method string) attribute.KeyValue {
+	method = strings.ToUpper(method)
+	switch method {
+	case http.MethodConnect,
+		http.MethodDelete,
+		http.MethodGet,
+		http.MethodHead,
+		http.MethodOptions,
+		http.MethodPatch,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodTrace:
+	default:
+		method = "_OTHER"
+	}
+
+	return semconv.HTTPRequestMethodKey.String(method)
+}
+
+func requiredHTTPPort(https bool, port int) int {
+	if https {
+		if port > 0 && port != 443 {
+			return port
+		}
+	} else {
+		if port > 0 && port != 80 {
+			return port
+		}
+	}
+
+	return -1
+}

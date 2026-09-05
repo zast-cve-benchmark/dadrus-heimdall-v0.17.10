@@ -1,0 +1,68 @@
+---
+title: "Default Rule"
+date: 2022-06-09T22:13:32+02:00
+draft: false
+weight: 62
+menu:
+  docs:
+    weight: 2
+    parent: "Rules"
+description: Heimdall lets you not only define upstream service specific rules, it does also support a definition of an optional default rule, which, if defined, kicks in, if no other rule matches. This way you can ensure secure defaults by simultaneously reducing the amount of work while defining upstream service API specific rules.
+---
+
+:toc:
+
+== Configuration
+
+The default rule can be configured using the `default_rule` property supporting the options shown below.
+
+[NOTE]
+====
+The default rule does not support all properties available in a link:{{< relref "regular_rule.adoc" >}}[regular rule].
+
+* It cannot be used to forward requests to an upstream service protected by heimdall. If heimdall is operating in reverse proxy mode, the default rule should be configured to reject requests. Otherwise, Heimdall will respond with an error.
+* The default rule also rejects requests containing encoded slashes in the URL path with a `400 Bad Request` response. In a regular rule, this behavior can be configured.
+* The authentication stage cannot start with an insecure authenticator (i.e., authenticators that allow all requests to pass through). However, this enforcement can be disabled (not recommended) by starting heimdall with the `--insecure-skip-secure-default-rule-enforcement` flag.
+====
+
+* *`execute`*: _link:{{< relref "regular_rule.adoc#_authentication_authorization_pipeline" >}}[Authentication & Authorization Pipeline]_ (mandatory)
++
+Which mechanisms to use for authentication, authorization and finalization stages of the pipeline. At least the authentication stage with at least one link:{{< relref "/docs/mechanisms/authenticators.adoc" >}}[authenticator] must be defined. A specific rule (see also link:{{< relref "regular_rule.adoc" >}}[Regular Rule]) can omit the definition of that stage, if it wants to reuse it from in the default rule. Same is true for other stages (See also link:{{< relref "/docs/concepts/rules.adoc#_default_rule_inheritance" >}}[Rule Inheritance]).
+
+* *`on_error`*: _link:{{< relref "regular_rule.adoc#_error_pipeline" >}}[Error Pipeline]_ (optional)
++
+Which error handler mechanisms to use if any of the mechanisms, defined in the `execute` property fail. Allows omitting the definition of error handlers in specific rules. As soon as a specific rule defines at least one error handler mechanism, all error handler mechanisms, defined in the default rule are ignored. If not specified, the default error handler is used.
+
+.Default rule configuration
+====
+[source, yaml]
+----
+default_rule:
+  execute:
+    - authenticator: session_cookie_from_kratos_authn
+    - authenticator: oauth2_introspect_token_from_keycloak_authn
+    - authorizer: deny_all_requests_authz
+    - finalizer: create_jwt
+  on_error:
+    - error_handler: authenticate_with_kratos_eh
+      if: |
+        type(Error) == authentication_error && Error.Source == "session_cookie_from_kratos_authn"
+----
+
+This example defines a default rule, with the authentication 6 authorization pipeline consisting of two authenticators, with `session_cookie_from_kratos_authn` being the first and `oauth2_introspect_token_from_keycloak_authn` being the fallback one (if the first one fails), a `deny_all_requests_authz` authorizer and the `create_jwt` finalizer. The error pipeline is configured to execute only the `authenticate_with_kratos_eh` error handler.
+
+Obviously, the authentication & authorization pipeline (defined in the `execute` property) of this default rule will always result in an error due to `deny_all_requests_authz`. This way it is thought to provide secure defaults and let the upstream specific (regular) rules override at least the part dealing with authorization. Such an upstream specific rule could then look like follows:
+
+[source, yaml]
+----
+id: rule:my-service:protected-api
+match:
+  routes:
+    - path: /foo
+execute:
+  - authorizer: allow_all_requests_authz
+----
+
+Take a look at how `on_error`, as well as the authenticators and finalizers from the `execute` definition of the default rule are reused. Easy, no?
+====
+ 

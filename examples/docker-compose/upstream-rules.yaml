@@ -1,0 +1,37 @@
+version: "1alpha4"
+rules:
+- id: demo:public
+  match:
+    routes:
+      - path: /public
+    methods: [ GET, POST ]
+  forward_to:
+    host: upstream:8081
+  execute:
+  - authenticator: anon
+  - finalizer: noop
+
+- id: demo:protected
+  match:
+    routes:
+      - path: /:user
+        path_params:
+          - type: regex
+            name: user
+            value: (user|admin)
+    methods: [ GET, POST ]
+  forward_to:
+    host: upstream:8081
+  execute:
+  - authenticator: jwt_auth
+  - authorizer: opa
+    config:
+      values:
+        policy: demo/can_access
+      payload: |
+        {
+          "input": {
+            "role": {{ quote .Subject.Attributes.role }},
+            "path": {{ quote .Request.URL.Path }}
+          }
+        }

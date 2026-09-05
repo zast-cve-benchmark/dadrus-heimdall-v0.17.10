@@ -1,0 +1,53 @@
+---
+title: "Rule Provider"
+date: 2022-11-29T22:31:36+02:00
+draft: false
+weight: 14
+menu:
+  docs:
+    parent: "Concepts"
+    weight: 4
+description: When rules define the behavior in sense of the desired authentication and authorization aspects, then the providers are those entities, which manage the lifecycle of these. That are the providers, which load, reload or remove rules when new rules appears, changes are detected, or rules are deleted.
+---
+
+:toc:
+
+== Rules Sets
+
+Regular, or link:{{< relref "/docs/rules/regular_rule.adoc" >}}[upstream-specific rules] must be organized, versioned, and loaded in a structured way. This structure is provided by so-called rule sets.
+
+A rule set is essentially a container for a list of rules, along with metadata such as its name and version. The actual format is provider-specific and depends on the rule provider in use — for example, rule sets may be defined in files, Kubernetes custom resources, or received via an API.
+
+However, rule sets offer more than just grouping: they also support ordering of rules to account for additional match constraints, such as HTTP methods, specific glob or regex patterns on path segments, or other conditions. For example, if two rules match the same host and path, but one additionally restricts the HTTP method that more specific rule should appear earlier in the list. Otherwise, the more general rule will be matched first and take precedence.
+
+Rule sets also support link:{{< relref "/docs/rules/regular_rule.adoc#_rule_matching_specificity_backtracking" >}}[backracking]. E.g., if a rule matches based on host and path, but fails due to its additional match conditions, heimdall may fall back to a less specific rule within the same rule set. This controlled fallback mechanism ensures that requests can still be processed meaningfully within the defined context.
+
+NOTE: Defining multiple rules with matching expressions that would result in handling the same requests — for example, rules with identical or overlapping host and path expressions — is only permitted within the same rule set.
+
+== Provider Types
+
+While all providers are different in the sense that they support different sources to load rule sets from, respectively monitor them, most of the providers use the same rule set format.
+
+The following table gives an overview of existing providers
+
+[cols="2,2,5"]
+|===
+| **Provider** | **Rule Set Format** | **Short Description**
+
+| link:{{< relref "/docs/rules/providers.adoc#_filesystem" >}}[File-System]
+| YAML or JSON
+| Loads rule set files from the local file system
+
+| link:{{< relref "/docs/rules/providers.adoc#_http_endpoint" >}}[HTTP Endpoint]
+| YAML or JSON
+| Loads rule sets from an HTTP(s) endpoint
+
+| link:{{< relref "/docs/rules/providers.adoc#_cloud_blob" >}}[Cloud Blob]
+| YAML or JSON
+| Loads rule sets from cloud blobs, like AWS S3, Google Cloud Storage, Azure Cloud Storage and alike.
+
+| link:{{< relref "/docs/rules/providers.adoc#_kubernetes" >}}[Kubernetes]
+| Custom Resource
+| Loads rule sets made available to a kubernetes cluster as custom resources.
+
+|===

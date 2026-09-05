@@ -1,0 +1,188 @@
+---
+title: "Configuration "
+date: 2022-07-08T09:16:36+02:00
+draft: false
+weight: 32
+menu:
+  docs:
+    parent: "Operations"
+    weight: 2
+description: This page explains the available configuration options in detail.
+---
+
+:toc:
+
+In heimdall, configuration encompasses two distinct concepts:
+
+* Static startup configuration, which is the focus of this document, and
+* Configuration of rules and rule sets, detailed link:{{< relref "/docs/rules/rule_sets.adoc" >}}[here].
+
+The static configuration establishes core services and components, such as the link:{{< relref "/docs/services/main.adoc" >}}[main service] - the primary entry point heimdall listens to for access control decisions - along with observability features like link:{{< relref "/docs/operations/observability.adoc#_logging" >}}[logging], the link:{{< relref "/docs/concepts/mechanisms.adoc" >}}[mechanism catalogue], the link:{{< relref "/docs/rules/default_rule.adoc" >}}[default rule], and link:{{< relref "/docs/rules/providers.adoc" >}}[rule providers]. These elements are designed to remain relatively stable over time.
+
+In contrast, the rule set configuration governs how heimdall processes requests for your system. This configuration is dynamic and supports seamless hot-reloading, allowing updates without disrupting requests or connections.
+
+== Overview
+
+Heimdall supports two methods to define static configuration options, which can be used independently or together:
+
+. In a link:{{< relref "#_configuration_file" >}}[Configuration File]
+. As link:{{< relref "#_environment_variables" >}}[Environment Variables]
+
+These are evaluated in the order listed above. This means configuration options set in a file can always be overridden by corresponding environment variables.
+
+If no configuration is provided, heimdall applies default settings. However, these defaults are minimal and lack context-specific details - such as the mechanisms required for your upstream services. Without additional configuration, heimdall will reject all requests with an HTTP `404 Not Found` response, as it cannot determine the appropriate rules or mechanisms.
+
+== Configuration File
+
+Upon startup, heimdall looks for a static configuration file named `heimdall.yaml` in the following locations:
+
+* `/etc/heimdall`
+* `$HOME/.config`
+* the current working directory
+
+You can override this default search by using the `--config` argument, e.g., `heimdall --config <path-to-your-config-file>`. Supported formats are YAML, or JSON.
+
+The configuration file can leverage environment variables, including both simple and complex values, with access provided through Bash-style syntax. The following expressions are supported:
+
+* `${var}` - Value of `$var`
+* `${var=default}` - If `$var` is not set, evaluate expression as `default`
+* `${var:=default}` - If `$var` is not set or is empty, evaluate expression as `default`
+
+.Possible minimal fully working configuration
+====
+
+The configuration below specifies a link:{{< relref "/docs/rules/default_rule.adoc" >}}[default rule] that instructs heimdall to generate a JSON Web Token (JWT) with the `sub` claim set to `anonymous` for all GET and POST requests across every URL. This JWT is then included in the `Authorization` header as a bearer token.
+
+[source,yaml]
+----
+log:
+  level: info
+
+mechanisms:
+  authenticators:
+  - id: anonymous_authenticator
+    type: anonymous
+  finalizers:
+  - id: create_jwt
+    type: jwt
+    config:
+      signer:
+        key_store:
+          path: /etc/heimdall/signer.pem
+
+default_rule:
+  execute:
+    - authenticator: anonymous_authenticator
+    - finalizer: create_jwt
+----
+====
+
+.Configuration with a mechanism defined using environment variables substitution
+====
+[source,yaml]
+----
+mechanisms:
+  authenticators:
+  - id: hydra_authenticator
+    type: oauth2_introspection
+    config:
+      introspection_endpoint:
+        url: https://hydra:4445/oauth2/introspect
+        auth:
+          type: basic_auth
+          config: ${INTROSPECTION_EP_CREDENTIALS}
+  finalizers:
+  - id: create_jwt
+    type: jwt
+    config:
+      signer:
+        key_store:
+          path: ${SIGNER_KEY_STORE_FILE}
+----
+
+This example demonstrates the use of both simple and complex values in environment variables. For instance, `SIGNER_KEY_STORE_FILE` is a straightforward string specifying the path to a PEM file, whereas `INTROSPECTION_EP_CREDENTIALS` is more intricate, representing a structure required by the `basic_auth` authentication type: `{ "user": "someUser", "password": "VerySecure" }`.
+
+====
+
+== Environment Variables
+
+Every configuration property, which can be defined in a link:{{< relref "#_configuration_file" >}}[configuration file] can also be defined as environment variable.
+Following rules apply:
+
+* If not specified while starting heimdall, all variables start with `HEIMDALLCFG_` prefix.
++
+CAUTION: If for whatever reason, your environment configuration contains variables starting with `HEIMDALLCFG_`, which do not define heimdall specific configuration, heimdall will refuse starting if such configuration variable clashes (has an unexpected type) with heimdall's configuration properties (even for environment variables, the configuration is type safe).
+You can overcome such situation, by ether renaming such variables, or, if this is not possible, make use of the `--env-config-prefix` flag with heimdall's `serve` command.
+
+* Properties in a hierarchy are separated by `_`
++
+E.g. the log level can be set to `info` in a config file as also shown in the above example with
++
+[source,yaml]
+----
+log:
+  level: info
+----
++
+and using an environment variable with
++
+[source,bash]
+----
+HEIMDALLCFG_LOG_LEVEL=info
+----
+
+
+* Array entries must be defined using `\_<IDX>[_]`, with `IDX` being the index of the array starting with `0` and `_` in brackets being only required, if the value of the configured element has a structure/hierarchy.
++
+E.g. the `trusted_proxies` property of the link:{{< relref "/docs/services/main.adoc" >}}[main service] can be configured in a config file as
++
+[source,yaml]
+----
+serve:
+  trusted_proxies:
+    - 192.168.1.0/24
+    - 192.168.2.0/24
+----
++
+and using environment variables with
++
+[source,bash]
+----
+HEIMDALLCFG_SERVE_TRUSTED__PROXIES_0=192.168.1.0/24
+HEIMDALLCFG_SERVE_TRUSTED__PROXIES_1=192.168.2.0/24
+----
++
+For structured configuration, like the definition of the authenticators in the example above
++
+[source,yaml]
+----
+mechanisms:
+  authenticators:
+  - id: anonymous_authenticator
+    type: anonymous
+----
++
+The corresponding environment variables would be
++
+[source,bash]
+----
+HEIMDALLCFG_MECHANISMS_AUTHENTICATORS_0_ID=anonymous_authenticator
+HEIMDALLCFG_MECHANISMS_AUTHENTICATORS_0_TYPE=anonymous
+----
+
+* If a name of a property has `\_` it must be escaped with an additional `_`.
++
+E.g. by setting the span processor to `simple`, you can instruct heimdall to synchronously export the created spans via configured exporters.
++
+[source,yaml]
+----
+tracing:
+  span_processor: simple
+----
++
+and using the environment variables with
++
+[source,bash]
+----
+HEIMDALLCFG_TRACING_SPAN__PROCESSOR=simple
+----

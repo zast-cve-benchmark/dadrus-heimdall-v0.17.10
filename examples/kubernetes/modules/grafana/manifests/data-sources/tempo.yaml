@@ -1,0 +1,59 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: tempo
+  namespace: ${namespace}
+spec:
+  datasource:
+    uid: TEMPO
+    name: Tempo
+    type: tempo
+    url: ${tempo_url}
+    isDefault: false
+    access: proxy
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: LOKI
+        spanStartTimeShift: '-10h'
+        spanEndTimeShift: '1h'
+        filterByTraceID: true
+        filterBySpanID: true
+      tracesToMetrics:
+        datasourceUid: PROMETHEUS
+        spanStartTimeShift: '-10h'
+        spanEndTimeShift: '1h'
+        tags:
+          - key: 'service.name'
+            value: 'app'
+        queries:
+          - name: 'See metrics'
+            query: 'sum(rate(http_server_request_duration_seconds_bucket{$__tags}[5m]))'
+      tracesToProfiles:
+        datasourceUid: PYROSCOPE
+        spanStartTimeShift: '-10h'
+        spanEndTimeShift: '1h'
+        tags:
+          - key: 'service.name'
+            value: 'service_name'
+        profileTypeId: 'process_cpu:cpu:nanoseconds:cpu:nanoseconds'
+        customQuery: false
+        #  customQuery: true
+        #  query: 'method="$${__span.tags.method}"'
+      serviceMap:
+        datasourceUid: PROMETHEUS
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+      spanBar:
+        type: 'Tag'
+        tag: 'http.path'
+      #streamingEnabled:
+      #  search: true
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana

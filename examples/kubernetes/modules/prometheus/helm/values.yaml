@@ -1,0 +1,16 @@
+kube-state-metrics:
+  enabled: true
+alertmanager:
+  enabled: true
+prometheus-node-exporter:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+
+server:
+  service:
+    servicePort: 9090
+  extraFlags:
+    - web.enable-remote-write-receiver
+    - web.enable-lifecycle
+    - log.format=json

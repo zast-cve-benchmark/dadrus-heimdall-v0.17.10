@@ -1,0 +1,12 @@
+services:
+  proxy:
+    image: envoyproxy/envoy:v1.35.3
+    volumes:
+    - ./envoy-config-grpc.yaml:/envoy.yaml:ro
+    ports:
+    - "9090:9090"
+    command: -c /envoy.yaml
+
+  heimdall:
+    command: serve decision -c /etc/heimdall/config.yaml --insecure --envoy-grpc
+
